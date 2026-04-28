@@ -16,7 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pythonjsonlogger.json import JsonFormatter
 
-from bridge import poller
+from bridge import poller, webhook
 from bridge.config import Config, load_config
 from bridge.db import close_pool, create_pool, healthcheck
 
@@ -72,6 +72,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=lifespan, title="Skwd AI Bridge")
+app.include_router(webhook.router)
 
 
 def _pool(app: FastAPI) -> asyncpg.Pool:

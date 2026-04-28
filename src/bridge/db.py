@@ -201,6 +201,22 @@ async def get_parent_for_threading(
         return await conn.fetchrow(_PARENT_LOOKUP_SQL, parent_id)
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# Q6 — find row id by slack_ts (webhook handler uses this to short-circuit
+#      reactions / thread replies on messages we don't own)
+# ──────────────────────────────────────────────────────────────────────────
+
+_FIND_ID_BY_SLACK_TS_SQL = (
+    "SELECT id FROM agent_messages WHERE slack_ts = $1 LIMIT 1"
+)
+
+
+async def find_id_by_slack_ts(pool: asyncpg.Pool, slack_ts: str) -> Any | None:
+    """Return the row id whose slack_ts matches, or None if no match."""
+    async with pool.acquire() as conn:
+        return await conn.fetchval(_FIND_ID_BY_SLACK_TS_SQL, slack_ts)
+
+
 def _rowcount(execute_result: str) -> int:
     # asyncpg's execute() returns the command tag, e.g. 'UPDATE 1' or 'UPDATE 0'.
     parts = execute_result.split()
