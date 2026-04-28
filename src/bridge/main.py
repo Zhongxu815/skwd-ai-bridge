@@ -6,6 +6,7 @@ are wired in later milestones.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -15,6 +16,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pythonjsonlogger.json import JsonFormatter
 
+from bridge import poller
 from bridge.config import Config, load_config
 from bridge.db import close_pool, create_pool, healthcheck
 
@@ -49,10 +51,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     pool = await create_pool(config.database_url)
     app.state.config = config
     app.state.db_pool = pool
+
+    if not config.bot_tokens:
+        logger.warning("no_bot_tokens_configured_poller_will_skip_all_rows")
+    poller_task = asyncio.create_task(
+        poller.run_forever(pool, config), name="bridge_poller"
+    )
+    app.state.poller_task = poller_task
+
     try:
         yield
     finally:
         logger.info("shutdown")
+        poller_task.cancel()
+        try:
+            await poller_task
+        except asyncio.CancelledError:
+            pass
         await close_pool(pool)
 
 

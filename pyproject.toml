@@ -12,6 +12,7 @@ dependencies = [
     "uvicorn[standard]>=0.34",
     "asyncpg>=0.30",
     "slack-sdk>=3.34",
+    "aiohttp>=3.10",
     "python-json-logger>=3.2",
 ]
 

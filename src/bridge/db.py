@@ -13,6 +13,7 @@ Query inventory (per spec + clarification):
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -24,12 +25,33 @@ POOL_MIN_SIZE = 1
 POOL_MAX_SIZE = 5  # spec: "pool of 5 connections"
 
 
+async def _init_connection(conn: asyncpg.Connection) -> None:
+    """Register JSON/JSONB codecs so payload columns deserialize as dicts.
+
+    Without this, asyncpg returns JSONB as a raw string and the formatter's
+    isinstance(payload, Mapping) check fails on every row.
+    """
+    await conn.set_type_codec(
+        "jsonb",
+        encoder=json.dumps,
+        decoder=json.loads,
+        schema="pg_catalog",
+    )
+    await conn.set_type_codec(
+        "json",
+        encoder=json.dumps,
+        decoder=json.loads,
+        schema="pg_catalog",
+    )
+
+
 async def create_pool(dsn: str) -> asyncpg.Pool:
     """Create the asyncpg pool and verify connectivity with SELECT 1."""
     pool = await asyncpg.create_pool(
         dsn=dsn,
         min_size=POOL_MIN_SIZE,
         max_size=POOL_MAX_SIZE,
+        init=_init_connection,
     )
     if pool is None:
         raise RuntimeError("asyncpg.create_pool returned None")
