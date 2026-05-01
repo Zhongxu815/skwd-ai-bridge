@@ -15,6 +15,13 @@ Layout per post:
   divider
   context:  id: `<truncated to 8 chars>`
 
+The `→ to_agent` indicator in the context line is essential — not just
+useful — for posts that land in `#squad-bus`. Many agents post into the
+bus, so bot identity is the only "who's speaking" signal, and
+`→ to_agent` is the only "who's this for" signal. Without it a reader
+can't tell at a glance whether a message in the firehose is meant for
+them or another agent.
+
 Truncation:
   query_response.answer       → 200 chars (per spec)
   fields documented "1 line"  → first non-empty line, then 200-char cap
