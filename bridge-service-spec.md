@@ -2,7 +2,7 @@
 
 **Status:** Approved for implementation
 **Owner:** Jay
-**Last updated:** Apr 28, 2026
+**Last updated:** Apr 30, 2026
 
 ---
 
@@ -40,6 +40,27 @@ Deploy as a sibling Railway service in the `skwd-ai` project, sharing the same P
 
 ---
 
+## Channel topology
+
+Three job-specific channels plus per-agent direct channels. Each channel has a single, clear purpose:
+
+| Channel | Purpose | Default destination? |
+|---|---|---|
+| `#squad-bus` | All inter-agent messages, threaded by conversation | Yes — default for agent-to-agent traffic |
+| `#squad-escalations` | Things Jay must see | Only via Ollie or P0 backstop |
+| `#squad-infra` | Argus production health monitoring | Argus only |
+| `#agent-{name}` | 1:1 Jay ↔ that agent direct conversation | Only when Jay or that agent specifically addresses each other |
+
+**Rationale:**
+
+- `#squad-bus` is where agents talk to each other. It's a firehose by design — Jay can read it when curious but does not need to track it.
+- `#squad-escalations` is the only channel that pings Jay. Ollie is the primary curator (she reads the bus and decides what crosses over). The bridge keeps a P0 backstop in case Ollie is offline or misses something.
+- `#agent-{name}` channels exist for direct, intentional conversation between Jay and a specific agent — agents asking Jay non-urgent questions, sending him weekly summaries, or Jay initiating a chat with a specific agent. These are low-traffic by design.
+
+This replaces the earlier "every agent posts to its own channel by default" model. That model was a firehose-per-agent that required Jay to track N channels; the new model centralizes inter-agent chatter in one place and reserves per-agent channels for direct conversation.
+
+---
+
 ## Configuration
 
 All config via environment variables. No config files.
@@ -73,24 +94,45 @@ Worst-case latency from row insert to Slack post: ~5s plus Slack API time.
 Apply rules in order. First match wins.
 
 ```
-1. IF to_agent = 'jay'
-   AND priority IN ('p0', 'p1')
-   AND message_type IN ('escalation', 'approval_required')
+1. IF slack_channel is explicitly set
+   THEN channel = slack_channel              (override)
+
+2. ELSE IF priority = 'p0'
+   THEN channel = '#squad-escalations'        (P0 backstop — never miss a true emergency)
+
+3. ELSE IF to_agent = 'jay'
+        AND message_type IN ('escalation', 'approval_required')
    THEN channel = '#squad-escalations'
 
-2. ELSE IF from_agent = 'argus'
+4. ELSE IF to_agent = 'jay'
+   THEN channel = '#agent-{from_agent}'       (agent talking to Jay specifically, non-urgent)
+
+5. ELSE IF from_agent = 'jay'
+   THEN channel = '#agent-{to_agent}'         (Jay talking to a specific agent)
+
+6. ELSE IF from_agent = 'argus'
    THEN channel = '#squad-infra'
 
-3. ELSE
-   channel = '#agent-{from_agent}'   (e.g. '#agent-audra')
+7. ELSE
+   channel = '#squad-bus'                     (default for agent-to-agent traffic)
 ```
 
-**Override:** If a row has `slack_channel` already set at insert time, the bridge respects it and skips routing rules. Lets agents post to `#squad-ops` or `#squad-boardroom` deliberately when needed.
+**Rules explained:**
+
+- **Rule 1 (override):** Lets a row deliberately target a specific channel (e.g., `#squad-ops`, `#squad-boardroom`).
+- **Rule 2 (P0 backstop):** Bridge guarantees Jay sees true emergencies even if Ollie is offline. Any row marked P0 lands in escalations regardless of message_type or to_agent.
+- **Rule 3 (escalation/approval to Jay):** Standard escalation path — Ollie or another agent explicitly raising something to Jay.
+- **Rule 4 (non-urgent message to Jay):** Agent has something for Jay specifically that isn't urgent — weekly report, design question, FYI. Lands in that agent's direct channel where Jay can read at his own pace.
+- **Rule 5 (Jay to a specific agent):** Jay-initiated direct message to an agent. Lands in that agent's channel.
+- **Rule 6 (Argus):** Production health stays in one place regardless of message type.
+- **Rule 7 (default):** Agent-to-agent traffic goes to the shared bus.
 
 **Notes on what this means:**
-- p2 messages to Jay (e.g. weekly burn report) land in the sender's agent channel, not escalations. Jay reads them when he visits that channel; no notification.
-- Argus is special-cased because production health feeds belong in one place regardless of message type.
-- Per-agent channels are the default home for an agent's output.
+
+- Audra's PR review (`from_agent='audra'`, `to_agent='ollie'`, `message_type='task_result'`, P2) → rule 7 → `#squad-bus`. Correct.
+- Audra asking Jay "should I be stricter about X?" (`to_agent='jay'`, `message_type='query'`, P2) → rule 4 → `#agent-audra`. Direct conversation, not noise.
+- Ollie escalating something Audra found (`from_agent='ollie'`, `to_agent='jay'`, `message_type='escalation'`, P1) → rule 3 → `#squad-escalations`. Standard path.
+- A genuine P0 from any agent → rule 2 → `#squad-escalations`. Backstop.
 
 ---
 
@@ -98,7 +140,7 @@ Apply rules in order. First match wins.
 
 Each Slack post is sent **as the `from_agent` bot**. The bridge looks up the bot token by `from_agent` value (`audra` → `SLACK_BOT_TOKEN_AUDRA`, etc.).
 
-This means: an Audra-authored task_result in `#squad-escalations` is posted by the Audra bot, not by a generic "bridge" bot. The author identity is preserved across channels.
+This means: an Audra-authored task_result in `#squad-bus` is posted by the Audra bot. An Ollie-authored escalation in `#squad-escalations` is posted by the Ollie bot. Author identity is preserved across channels — important for `#squad-bus`, where many agents post into the same channel and the bot identity is the only signal of who's speaking.
 
 If `from_agent` is `jay` (Jay-authored direction-setting), the message gets a generic bot identity (TBD — placeholder for now). This is rare and only relevant once Jay sends messages through the bus rather than just receiving them.
 
@@ -279,6 +321,8 @@ Implementation: keep formatting in a single `format_message(row) -> List[Block]`
 
 Footer always shows: `id` (truncated to 8 chars), and a hint about how to react (one-line legend on first message of each thread, optional).
 
+In `#squad-bus` specifically, where many agents post into the same channel, the `→ [to_agent]` indicator is essential — it's how a reader sees at a glance who a message is meant for.
+
 ---
 
 ## Threading
@@ -288,6 +332,8 @@ If `agent_messages.reply_to IS NOT NULL`, the bridge looks up the parent's `slac
 If the parent has no `slack_ts` yet (parent failed to post, or hasn't been posted yet in this poll), the reply is held back — the bridge skips it on this iteration and tries again next poll. This means replies can briefly lag their parents but will always land in-order.
 
 After `MAX_POST_RETRIES` worth of waiting (i.e., a parent stuck in `failed`), the reply gets posted as a top-level message in its target channel with a note in the footer that the parent failed. This prevents a single bad row from blocking an entire conversation.
+
+**Threading discipline matters more in `#squad-bus`.** A flat firehose of cross-agent messages would be unreadable. Agent prompts must enforce "always set `reply_to` when responding to a previous message in a chain" so that conversations stay grouped as Slack threads inside the bus channel.
 
 ---
 
@@ -318,15 +364,17 @@ For end-to-end testing: deploy to Railway as a draft service, point Slack Events
 
 Manual end-to-end verification before declaring v1 done:
 
-1. INSERT a new row into `agent_messages` (e.g. a fresh task from Audra to Ollie, p2). Wait <10s. Confirm it appears in `#agent-audra`.
+1. INSERT a new task_result from Audra to Ollie (P2). Wait <10s. Confirm it appears in `#squad-bus`.
 2. Verify the row's `slack_ts` is now populated.
 3. React with 👍 in Slack. Wait <5s. Confirm `human_action = 'approved'` in DB.
 4. Reply to the Slack message in-thread with "looks good." Confirm `human_note` contains "looks good."
-5. INSERT a P0 escalation from Ollie to Jay. Confirm it lands in `#squad-escalations`, not `#agent-ollie`.
-6. INSERT a row from Argus. Confirm it lands in `#squad-infra`.
-7. INSERT a row with `slack_channel = '#squad-boardroom'` set. Confirm the override wins.
-8. Force a failure (set a bogus token for one bot temporarily, INSERT a row from that bot). Confirm 4 retries in logs, then `status = 'failed'` in DB. Confirm the queue keeps moving (other rows still post).
-9. INSERT a reply (a row with `reply_to` set). Confirm it threads under the parent.
+5. INSERT a P0 escalation from any agent to Jay. Confirm it lands in `#squad-escalations` (rule 2 backstop).
+6. INSERT a P1 escalation from Ollie to Jay. Confirm it lands in `#squad-escalations` (rule 3).
+7. INSERT a P2 query from Audra to Jay. Confirm it lands in `#agent-audra` (rule 4 — direct conversation).
+8. INSERT a row from Argus. Confirm it lands in `#squad-infra`.
+9. INSERT a row with `slack_channel = '#squad-boardroom'` set. Confirm the override wins.
+10. Force a failure (set a bogus token for one bot temporarily, INSERT a row from that bot). Confirm 4 retries in logs, then `status = 'failed'` in DB. Confirm the queue keeps moving.
+11. INSERT a reply (a row with `reply_to` set) where parent is in `#squad-bus`. Confirm it threads under the parent in `#squad-bus`.
 
 ---
 
@@ -339,6 +387,7 @@ Manual end-to-end verification before declaring v1 done:
 - Metrics/observability beyond logs
 - Authentication beyond Slack signing secret (no admin endpoints exposed)
 - Backfill: if the bridge is down for hours, it catches up by polling normally on restart. No special replay logic.
+- Ollie's escalation logic — Ollie's bus-watching and "does Jay need this?" decision-making is a separate agent, deferred to its own session. Until Ollie ships, the only path from agent → Jay is the P0 backstop (rule 2) plus explicit `to_agent='jay'` messages from agents (rules 3 and 4).
 
 ---
 
