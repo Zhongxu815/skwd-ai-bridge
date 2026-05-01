@@ -145,10 +145,10 @@ class TestHappyPath:
         assert len(slack_state.posts) == 1
         post = slack_state.posts[0]
         assert post["token"] == "xoxb-A"
-        assert post["channel"] == "#agent-audra"
+        assert post["channel"] == "#squad-bus"
         assert post["thread_ts"] is None
         assert post["fallback_text"] == "Test subject"
-        assert db_state.posted == [("r1", "#agent-audra", "ts-1", "ts-1")]
+        assert db_state.posted == [("r1", "#squad-bus", "ts-1", "ts-1")]
         assert db_state.failed == []
 
     async def test_routing_override_respected(
@@ -256,7 +256,7 @@ class TestThreading:
         await poller.poll_once(None, _config(), {})
         assert slack_state.posts[0]["thread_ts"] == "1234.5678"
         # mark_posted records slack_thread_ts = parent's ts (not the new ts)
-        assert db_state.posted == [("r2", "#agent-audra", "ts-1", "1234.5678")]
+        assert db_state.posted == [("r2", "#squad-bus", "ts-1", "1234.5678")]
 
     async def test_parent_unposted_held_back(
         self, db_state: _DbState, slack_state: _SlackState
